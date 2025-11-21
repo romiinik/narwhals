@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     import polars as pl
     import pyarrow as pa
     import pyspark.sql as pyspark_sql
+    import snowflake.snowpark
     from pyspark.sql.connect.dataframe import DataFrame as PySparkConnectDataFrame
     from typing_extensions import TypeGuard, TypeIs
 
@@ -124,6 +125,11 @@ def get_pyspark_connect() -> Any:
 def get_sqlframe() -> Any:
     """Get sqlframe module (if already imported - else return None)."""
     return sys.modules.get("sqlframe", None)
+
+
+def get_snowflake() -> Any:
+    """Get snowflake.snowpark module (if already imported - else return None)."""
+    return sys.modules.get("snowflake.snowpark", None)
 
 
 def _warn_if_narwhals_df_or_lf(df: Any) -> None:
@@ -391,6 +397,18 @@ def is_sqlframe_dataframe(df: Any) -> TypeIs[SQLFrameDataFrame]:
     return False  # pragma: no cover
 
 
+def is_snowpark_dataframe(df: Any) -> bool:
+    """Check whether `df` is a Snowpark DataFrame without importing Snowflake.
+
+    Warning:
+        This method cannot be called on a Narwhals DataFrame/LazyFrame.
+    """
+    _warn_if_narwhals_df_or_lf(df)
+    if (snowpark := get_snowflake()) is not None:
+        return isinstance(df, snowpark.DataFrame)
+    return False
+
+
 def is_numpy_array(arr: Any | _NDArray[_ShapeT]) -> TypeIs[_NDArray[_ShapeT]]:
     """Check whether `arr` is a NumPy Array without importing NumPy."""
     return (np := get_numpy()) is not None and isinstance(arr, np.ndarray)
@@ -592,6 +610,7 @@ __all__ = [
     "get_pandas",
     "get_polars",
     "get_pyarrow",
+    "get_snowflake",
     "is_cudf_dataframe",
     "is_cudf_series",
     "is_dask_dataframe",
@@ -614,4 +633,5 @@ __all__ = [
     "is_polars_series",
     "is_pyarrow_chunked_array",
     "is_pyarrow_table",
+    "is_snowpark_dataframe",
 ]

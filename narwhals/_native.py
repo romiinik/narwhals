@@ -118,6 +118,7 @@ from narwhals.dependencies import (
     is_ibis_table,
     is_pyspark_connect_dataframe,
     is_pyspark_dataframe,
+    is_snowpark_dataframe,
     is_sqlframe_dataframe,
 )
 
@@ -126,6 +127,7 @@ if TYPE_CHECKING:
     import pandas as pd
     import polars as pl
     import pyarrow as pa
+    import snowflake.snowpark
     from sqlframe.base.dataframe import BaseDataFrame as _BaseDataFrame
     from typing_extensions import Self, TypeAlias, TypeIs
 
@@ -163,6 +165,7 @@ __all__ = [
     "NativePySparkConnect",
     "NativeSQLFrame",
     "NativeSeries",
+    "NativeSnowflake",
     "NativeSparkLike",
     "NativeUnknown",
     "is_native_arrow",
@@ -176,6 +179,7 @@ __all__ = [
     "is_native_polars",
     "is_native_pyspark",
     "is_native_pyspark_connect",
+    "is_native_snowflake",
     "is_native_spark_like",
     "is_native_sqlframe",
 ]
@@ -272,7 +276,8 @@ NativeSQLFrame: TypeAlias = "_BaseDataFrame[Any, Any, Any, Any, Any]"
 NativePySpark: TypeAlias = _PySparkDataFrame
 NativePySparkConnect: TypeAlias = _PySparkDataFrame
 NativeSparkLike: TypeAlias = "NativeSQLFrame | NativePySpark | NativePySparkConnect"
-NativeKnown: TypeAlias = "NativePolars | NativeArrow | NativePandasLike | NativeSparkLike | NativeDuckDB | NativeDask | NativeIbis"
+NativeSnowflake: TypeAlias = "snowflake.snowpark.DataFrame"
+NativeKnown: TypeAlias = "NativePolars | NativeArrow | NativePandasLike | NativeSparkLike | NativeDuckDB | NativeDask | NativeIbis | NativeSnowflake"
 NativeUnknown: TypeAlias = "NativeDataFrame | NativeSeries | NativeLazyFrame"
 NativeAny: TypeAlias = "NativeKnown | NativeUnknown"
 
@@ -383,6 +388,7 @@ is_native_pyspark_connect = cast(
     "_Guard[NativePySparkConnect]", is_pyspark_connect_dataframe
 )
 is_native_ibis = cast("_Guard[NativeIbis]", is_ibis_table)
+is_native_snowflake = cast("_Guard[NativeSnowflake]", is_snowpark_dataframe)
 
 
 def is_native_pandas(obj: Any) -> TypeIs[NativePandas]:

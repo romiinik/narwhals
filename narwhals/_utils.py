@@ -40,6 +40,7 @@ from narwhals.dependencies import (
     get_pyarrow,
     get_pyspark_connect,
     get_pyspark_sql,
+    get_snowflake,
     get_sqlframe,
     is_narwhals_series,
     is_narwhals_series_int,
@@ -338,6 +339,8 @@ class Implementation(NoAutoEnum):
     """DuckDB implementation."""
     IBIS = "ibis"
     """Ibis implementation."""
+    SNOWFLAKE = "snowflake"
+    """Snowflake implementation."""
     SQLFRAME = "sqlframe"
     """SQLFrame implementation."""
     PYSPARK_CONNECT = "pyspark[connect]"
@@ -367,6 +370,7 @@ class Implementation(NoAutoEnum):
             get_dask_dataframe(): Implementation.DASK,
             get_duckdb(): Implementation.DUCKDB,
             get_ibis(): Implementation.IBIS,
+            get_snowflake(): Implementation.SNOWFLAKE,
             get_sqlframe(): Implementation.SQLFRAME,
             get_pyspark_connect(): Implementation.PYSPARK_CONNECT,
         }
@@ -600,6 +604,7 @@ MIN_VERSIONS: Mapping[Implementation, tuple[int, ...]] = {
     Implementation.DASK: (2024, 8),
     Implementation.DUCKDB: (1, 1),
     Implementation.IBIS: (6,),
+    Implementation.SNOWFLAKE: (1, 0),
     Implementation.SQLFRAME: (3, 22, 0),
 }
 
@@ -608,6 +613,7 @@ _IMPLEMENTATION_TO_MODULE_NAME: Mapping[Implementation, str] = {
     Implementation.MODIN: "modin.pandas",
     Implementation.PYSPARK: "pyspark.sql",
     Implementation.PYSPARK_CONNECT: "pyspark.sql.connect",
+    Implementation.SNOWFLAKE: "snowflake.snowpark",
 }
 """Stores non default mapping from Implementation to module name"""
 

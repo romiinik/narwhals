@@ -11,6 +11,7 @@ from narwhals._native import (
     is_native_arrow,
     is_native_pandas_like,
     is_native_polars,
+    is_native_snowflake,
     is_native_spark_like,
 )
 from narwhals._utils import (
@@ -518,6 +519,19 @@ def _from_native_impl(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if eager_only or series_only:  # pragma: no cover
             if not pass_through:
                 msg = "Cannot only use `series_only=True` or `eager_only=False` with ibis.Table"
+                raise TypeError(msg)
+            return native_object
+        return (
+            version.namespace.from_native_object(native_object)
+            .compliant.from_native(native_object)
+            .to_narwhals()
+        )
+
+    # Snowflake
+    if is_native_snowflake(native_object):
+        if eager_only or series_only:
+            if not pass_through:
+                msg = "Cannot only use `series_only=True` or `eager_only=False` with Snowpark DataFrame"
                 raise TypeError(msg)
             return native_object
         return (
