@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Callable
 
-from narwhals._snowflake.utils import col, lit
 from narwhals._sql.expr import SQLExpr
-from narwhals._utils import Implementation, Version, extend_bool
+from narwhals._utils import Implementation, Version
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -17,21 +16,19 @@ if TYPE_CHECKING:
         EvalSeries,
         WindowFunction,
     )
-    from narwhals._compliant.window import WindowInputs
     from narwhals._snowflake.dataframe import SnowflakeLazyFrame
     from narwhals._snowflake.namespace import SnowflakeNamespace
     from narwhals._snowflake.typing import SnowparkColumnT
     from narwhals._utils import _LimitedContext
 
     SnowflakeWindowFunction = WindowFunction[SnowflakeLazyFrame, SnowparkColumnT]
-    SnowflakeWindowInputs = WindowInputs[SnowparkColumnT]
 
 
 class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
-    """Narwhals expression wrapper for Snowpark Column.
+    """Narwhals Expression wrapper for Snowpark Column.
     
-    This class wraps Snowpark Column operations and provides the Narwhals
-    expression interface for lazy query building on Snowflake.
+    This class wraps Snowpark Column expressions and provides the Narwhals
+    expression interface for building queries on Snowflake.
     """
 
     _implementation = Implementation.SNOWFLAKE
@@ -54,7 +51,7 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
             evaluate_output_names: Function to evaluate output column names.
             alias_output_names: Optional function to alias output names.
             version: The Narwhals version for compatibility.
-            implementation: The implementation type (SNOWFLAKE).
+            implementation: The backend implementation (default: SNOWFLAKE).
         """
         self._call = call
         self._evaluate_output_names = evaluate_output_names
@@ -75,9 +72,14 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
     def broadcast(self) -> Self:
         """Broadcast the expression to all rows.
         
+        For Snowflake, broadcasting is achieved by using a window function
+        over a constant partition.
+        
         Returns:
-            A new expression that broadcasts to all rows.
+            A new SnowflakeExpr with broadcasting applied.
         """
+        from narwhals._snowflake.utils import lit
+
         return self.over([lit(1)], [])
 
     @classmethod
@@ -91,12 +93,14 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
         """Create an expression from column names.
         
         Arguments:
-            evaluate_column_names: Function that returns column names.
-            context: The limited context containing version information.
+            evaluate_column_names: Function that returns column names from a dataframe.
+            context: Limited context containing version information.
             
         Returns:
-            A new SnowflakeExpr instance.
+            A new SnowflakeExpr that selects the specified columns.
         """
+        from narwhals._snowflake.utils import col
+
         def func(df: SnowflakeLazyFrame) -> list[SnowparkColumnT]:
             return [col(name) for name in evaluate_column_names(df)]
 
@@ -115,11 +119,13 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
         
         Arguments:
             column_indices: The indices of columns to select.
-            context: The limited context containing version information.
+            context: Limited context containing version information.
             
         Returns:
-            A new SnowflakeExpr instance.
+            A new SnowflakeExpr that selects columns by index.
         """
+        from narwhals._snowflake.utils import col
+
         def func(df: SnowflakeLazyFrame) -> list[SnowparkColumnT]:
             columns = df.columns
             return [col(columns[i]) for i in column_indices]
@@ -144,121 +150,52 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
         """
         return expr.alias(name)
 
-    def _count_star(self) -> SnowparkColumnT:
-        """Create a COUNT(*) expression.
+    # Arithmetic operations
+    def __neg__(self) -> Self:
+        """Negate the expression.
         
         Returns:
-            A Snowpark Column representing COUNT(*).
+            A new SnowflakeExpr with negation applied.
         """
-        from snowflake.snowpark import functions as F
-
-        return F.count(lit(1))
-
-    def _window_expression(
-        self,
-        expr: SnowparkColumnT,
-        partition_by: Sequence[str | SnowparkColumnT] = (),
-        order_by: Sequence[str | SnowparkColumnT] = (),
-        rows_start: int | None = None,
-        rows_end: int | None = None,
-        *,
-        descending: Sequence[bool] | None = None,
-        nulls_last: Sequence[bool] | None = None,
-    ) -> SnowparkColumnT:
-        """Create a window expression.
-        
-        Arguments:
-            expr: The expression to apply the window to.
-            partition_by: Columns to partition by.
-            order_by: Columns to order by.
-            rows_start: Starting row offset for the window frame.
-            rows_end: Ending row offset for the window frame.
-            descending: Whether to sort in descending order.
-            nulls_last: Whether to put nulls last in ordering.
-            
-        Returns:
-            A Snowpark Column with window specification.
-        """
-        from snowflake.snowpark import Window
-
-        # Convert string column names to Column objects
-        partition_cols = [
-            col(c) if isinstance(c, str) else c for c in partition_by
-        ]
-        order_cols = [
-            col(c) if isinstance(c, str) else c for c in order_by
-        ]
-
-        # Create window specification
-        window_spec = Window.partition_by(*partition_cols) if partition_cols else Window
-
-        # Add ordering if specified
-        if order_cols:
-            descending = descending or extend_bool(False, len(order_cols))
-            nulls_last = nulls_last or extend_bool(False, len(order_cols))
-            
-            for order_col, desc, null_last in zip(order_cols, descending, nulls_last):
-                if desc:
-                    order_col = order_col.desc()
-                else:
-                    order_col = order_col.asc()
-                
-                if null_last:
-                    order_col = order_col.nulls_last()
-                else:
-                    order_col = order_col.nulls_first()
-                
-                window_spec = window_spec.order_by(order_col)
-
-        # Add row frame if specified
-        if rows_start is not None or rows_end is not None:
-            start = rows_start if rows_start is not None else Window.UNBOUNDED_PRECEDING
-            end = rows_end if rows_end is not None else Window.CURRENT_ROW
-            window_spec = window_spec.rows_between(start, end)
-
-        return expr.over(window_spec)
-
-    def _first(self, expr: SnowparkColumnT, *order_by: str) -> SnowparkColumnT:
-        """Get the first value ordered by specified columns.
-        
-        Arguments:
-            expr: The expression to get the first value from.
-            order_by: Columns to order by.
-            
-        Returns:
-            A Snowpark Column representing the first value.
-        """
-        from snowflake.snowpark import functions as F
-
-        if order_by:
-            # Use first_value with ordering
-            return F.first_value(expr)
-        return F.first_value(expr)
-
-    def _last(self, expr: SnowparkColumnT, *order_by: str) -> SnowparkColumnT:
-        """Get the last value ordered by specified columns.
-        
-        Arguments:
-            expr: The expression to get the last value from.
-            order_by: Columns to order by.
-            
-        Returns:
-            A Snowpark Column representing the last value.
-        """
-        from snowflake.snowpark import functions as F
-
-        if order_by:
-            # Use last_value with ordering
-            return F.last_value(expr)
-        return F.last_value(expr)
+        return self._with_elementwise(lambda expr: -expr)
 
     def __invert__(self) -> Self:
-        """Invert a boolean expression (NOT operation).
+        """Invert the expression (bitwise NOT for integers, logical NOT for booleans).
         
         Returns:
-            A new expression with the inverted boolean value.
+            A new SnowflakeExpr with inversion applied.
         """
-        import operator
+        return self._with_elementwise(lambda expr: ~expr)
 
-        invert = operator.invert
-        return self._with_elementwise(invert)
+    def __radd__(self, other: Self) -> Self:
+        """Right-hand addition (other + self).
+        
+        Arguments:
+            other: The left-hand operand.
+            
+        Returns:
+            A new SnowflakeExpr with addition applied.
+        """
+        return (self + other).alias("literal")  # type: ignore[return-value]
+
+    def __rmul__(self, other: Self) -> Self:
+        """Right-hand multiplication (other * self).
+        
+        Arguments:
+            other: The left-hand operand.
+            
+        Returns:
+            A new SnowflakeExpr with multiplication applied.
+        """
+        return (self * other).alias("literal")  # type: ignore[return-value]
+
+    # Comparison operations
+    # The following comparison operations are inherited from SQLExpr:
+    # __eq__, __ne__, __lt__, __le__, __gt__, __ge__
+    # These work with Snowpark Column objects which support Python's comparison operators natively.
+
+    # Logical operations
+    # The following logical operations are inherited from SQLExpr:
+    # __and__, __or__
+    # Combined with __invert__ (implemented above), these provide full boolean logic support.
+    # Snowpark Column objects support these operators natively for boolean operations.
