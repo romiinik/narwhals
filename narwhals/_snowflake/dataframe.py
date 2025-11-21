@@ -7,6 +7,7 @@ from narwhals._sql.dataframe import SQLLazyFrame
 from narwhals._utils import Implementation, ValidateBackendVersion, Version
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from types import ModuleType
 
     from typing_extensions import Self, TypeIs
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from narwhals.dataframe import LazyFrame
     from narwhals.dtypes import DType
     from narwhals.stable.v1 import DataFrame as DataFrameV1
+    from narwhals.typing import UniqueKeepStrategy
 
 
 class SnowflakeLazyFrame(
@@ -459,4 +461,150 @@ class SnowflakeLazyFrame(
             
         except Exception as e:
             msg = f"Failed to perform join on Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
+
+    def sort(
+        self, *by: str, descending: bool | Sequence[bool], nulls_last: bool
+    ) -> Self:
+        """Sort the DataFrame by one or more columns.
+        
+        Arguments:
+            by: Column names to sort by.
+            descending: Whether to sort in descending order. Can be a single bool
+                for all columns or a sequence of bools for each column.
+            nulls_last: Whether to place null values last in the sort order.
+            
+        Returns:
+            A new SnowflakeLazyFrame with sorted rows.
+            
+        Raises:
+            RuntimeError: If the sort operation fails.
+        """
+        from narwhals._snowflake.utils import col
+        from narwhals._utils import extend_bool
+
+        try:
+            # Extend descending to match the number of sort columns
+            descending_list = extend_bool(descending, len(by))
+            
+            # Build sort columns with appropriate ordering
+            sort_cols = []
+            for name, desc in zip(by, descending_list):
+                sort_col = col(name)
+                
+                # Apply descending order if needed
+                if desc:
+                    sort_col = sort_col.desc()
+                else:
+                    sort_col = sort_col.asc()
+                
+                # Apply null ordering
+                if nulls_last:
+                    sort_col = sort_col.nulls_last()
+                else:
+                    sort_col = sort_col.nulls_first()
+                
+                sort_cols.append(sort_col)
+            
+            # Use Snowpark's sort method
+            return self._with_native(self._native_frame.sort(*sort_cols))
+            
+        except Exception as e:
+            msg = f"Failed to sort Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
+
+    def unique(
+        self,
+        subset: Sequence[str] | None,
+        *,
+        keep: UniqueKeepStrategy,
+        order_by: Sequence[str] | None,
+    ) -> Self:
+        """Get unique rows from the DataFrame.
+        
+        Arguments:
+            subset: Column names to consider for uniqueness. If None, use all columns.
+            keep: Which duplicate to keep - 'any', 'first', 'last', or 'none'.
+                - 'any': Keep any duplicate (fastest, uses distinct)
+                - 'first': Keep the first occurrence
+                - 'last': Keep the last occurrence
+                - 'none': Drop all duplicates (keep only unique rows)
+            order_by: Column names to order by when determining first/last.
+            
+        Returns:
+            A new SnowflakeLazyFrame with unique rows.
+            
+        Raises:
+            RuntimeError: If the unique operation fails.
+        """
+        from snowflake.snowpark import Window
+        from snowflake.snowpark import functions as F
+
+        from narwhals._snowflake.utils import col
+        from narwhals._utils import extend_bool, generate_temporary_column_name
+
+        try:
+            # Determine which columns to check for uniqueness
+            subset_ = subset if subset is not None else self.columns
+            
+            # Check that subset columns exist
+            if error := self._check_columns_exist(subset_):
+                raise error
+            
+            # For 'any' strategy, we can use Snowpark's distinct or drop_duplicates
+            if keep == "any":
+                if subset is None:
+                    # Use distinct for all columns
+                    return self._with_native(self._native_frame.distinct())
+                else:
+                    # Use drop_duplicates for specific columns
+                    return self._with_native(self._native_frame.drop_duplicates(subset_))
+            
+            # For 'first', 'last', or 'none', we need to use window functions
+            # Generate a temporary column name for the row number
+            tmp_name = generate_temporary_column_name(8, self.columns, prefix="row_index_")
+            
+            # Build the window specification
+            # Partition by the subset columns
+            window_spec = Window.partition_by([col(name) for name in subset_])
+            
+            # Add ordering if specified
+            if order_by:
+                # For 'last', we need to reverse the order
+                if keep == "last":
+                    descending_list = extend_bool(True, len(order_by))
+                    order_cols = [
+                        col(name).desc().nulls_last() if desc else col(name).asc().nulls_first()
+                        for name, desc in zip(order_by, descending_list)
+                    ]
+                else:
+                    order_cols = [col(name).asc().nulls_first() for name in order_by]
+                window_spec = window_spec.order_by(order_cols)
+            
+            # Choose the appropriate window function
+            if keep == "none":
+                # Use count to identify rows that appear only once
+                window_expr = F.count("*").over(window_spec)
+            else:
+                # Use row_number to identify the first/last occurrence
+                window_expr = F.row_number().over(window_spec)
+            
+            # Add the window expression as a temporary column
+            df_with_index = self._native_frame.with_column(tmp_name, window_expr)
+            
+            # Filter to keep only the desired rows
+            if keep == "none":
+                # Keep only rows where count == 1 (unique rows)
+                filtered = df_with_index.filter(col(tmp_name) == 1)
+            else:
+                # Keep only rows where row_number == 1 (first/last occurrence)
+                filtered = df_with_index.filter(col(tmp_name) == 1)
+            
+            # Drop the temporary column
+            result = filtered.drop(tmp_name)
+            
+            return self._with_native(result)
+            
+        except Exception as e:
+            msg = f"Failed to get unique rows from Snowflake DataFrame: {e}"
             raise RuntimeError(msg) from e
