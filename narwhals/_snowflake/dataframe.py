@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self, TypeIs
 
     from narwhals._snowflake.expr import SnowflakeExpr
+    from narwhals._snowflake.group_by import SnowflakeGroupBy
     from narwhals._snowflake.namespace import SnowflakeNamespace
     from narwhals._snowflake.typing import SnowparkDataFrameT
     from narwhals._utils import _LimitedContext
@@ -254,3 +255,208 @@ class SnowflakeLazyFrame(
             msg = "`backend` argument is not supported for Snowflake"
             raise ValueError(msg)
         return self
+
+    def filter(self, predicate: SnowflakeExpr) -> Self:
+        """Filter rows based on a predicate expression.
+        
+        Arguments:
+            predicate: A boolean expression to filter rows.
+            
+        Returns:
+            A new SnowflakeLazyFrame with filtered rows.
+            
+        Raises:
+            RuntimeError: If the filter operation fails.
+        """
+        try:
+            # Evaluate the predicate expression to get the Snowpark Column
+            # [0] is safe as the predicate expression returns a single column
+            mask = predicate(self)[0]
+            # Use Snowpark's filter method (equivalent to where)
+            return self._with_native(self._native_frame.filter(mask))
+        except Exception as e:
+            msg = f"Failed to apply filter on Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
+
+    def with_columns(self, *exprs: SnowflakeExpr) -> Self:
+        """Add or modify columns in the DataFrame.
+        
+        This method evaluates the given expressions and adds them as new columns
+        or modifies existing columns with the same name. The operation uses
+        Snowpark's select to reconstruct the DataFrame with the new/modified columns.
+        
+        Arguments:
+            exprs: Expressions that define the columns to add or modify.
+            
+        Returns:
+            A new SnowflakeLazyFrame with the added/modified columns.
+            
+        Raises:
+            RuntimeError: If the with_columns operation fails.
+        """
+        try:
+            from narwhals._snowflake.utils import col, evaluate_exprs_and_aliases
+            
+            # Evaluate all expressions and get their aliases
+            new_columns_map = dict(evaluate_exprs_and_aliases(self, *exprs))
+            
+            # Build the selection: existing columns (possibly replaced) + new columns
+            result = []
+            
+            # First, add all existing columns (using new values if they exist in new_columns_map)
+            for name in self.columns:
+                if name in new_columns_map:
+                    # Replace with new column value
+                    result.append(new_columns_map.pop(name).alias(name))
+                else:
+                    # Keep existing column
+                    result.append(col(name))
+            
+            # Then, add any remaining new columns that weren't replacements
+            result.extend(value.alias(name) for name, value in new_columns_map.items())
+            
+            # Use Snowpark's select to apply all columns at once
+            return self._with_native(self._native_frame.select(*result))
+        except Exception as e:
+            msg = f"Failed to apply with_columns on Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
+
+    def drop_nulls(self, subset: list[str] | None) -> Self:
+        """Drop rows with null values in specified columns.
+        
+        Arguments:
+            subset: Column names to check for null values. If None, check all columns.
+            
+        Returns:
+            A new SnowflakeLazyFrame with null rows removed.
+        """
+        from functools import reduce
+        from operator import and_
+
+        from narwhals._snowflake.utils import col
+
+        subset_ = subset if subset is not None else self.columns
+        keep_condition = reduce(and_, (col(name).is_not_null() for name in subset_))
+        return self._with_native(self._native_frame.filter(keep_condition))
+
+    def rename(self, mapping: dict[str, str]) -> Self:
+        """Rename columns in the DataFrame.
+        
+        Arguments:
+            mapping: Dictionary mapping old column names to new column names.
+            
+        Returns:
+            A new SnowflakeLazyFrame with renamed columns.
+        """
+        result = self._native_frame
+        for old_name, new_name in mapping.items():
+            result = result.with_column_renamed(old_name, new_name)
+        return self._with_native(result)
+
+    def group_by(
+        self, *keys: str | SnowflakeExpr, drop_null_keys: bool
+    ) -> SnowflakeGroupBy:
+        """Group the DataFrame by one or more columns.
+        
+        Arguments:
+            keys: Column names or expressions to group by.
+            drop_null_keys: Whether to drop rows with null values in the grouping keys.
+            
+        Returns:
+            A SnowflakeGroupBy object for performing aggregations.
+        """
+        from narwhals._snowflake.group_by import SnowflakeGroupBy
+
+        return SnowflakeGroupBy(self, keys, drop_null_keys=drop_null_keys)
+
+    def join(
+        self,
+        other: Self,
+        *,
+        how: str,
+        left_on: list[str] | None,
+        right_on: list[str] | None,
+        suffix: str,
+    ) -> Self:
+        """Join this DataFrame with another DataFrame.
+        
+        Arguments:
+            other: The right DataFrame to join with.
+            how: Join strategy - one of 'inner', 'left', 'full', 'cross', 'semi', 'anti'.
+            left_on: Column names from the left DataFrame to join on.
+            right_on: Column names from the right DataFrame to join on.
+            suffix: Suffix to add to overlapping column names from the right DataFrame.
+            
+        Returns:
+            A new SnowflakeLazyFrame with the joined data.
+            
+        Raises:
+            RuntimeError: If the join operation fails.
+        """
+        from functools import reduce
+        from operator import and_
+
+        from narwhals._snowflake.utils import col
+
+        try:
+            # Map Narwhals join types to Snowpark join types
+            # Snowpark uses 'outer' instead of 'full'
+            native_how = "outer" if how == "full" else how
+            
+            if native_how == "cross":
+                # Cross join doesn't need join conditions
+                lhs = self._native_frame.alias("lhs")
+                rhs = other._native_frame.alias("rhs")
+                joined = lhs.cross_join(rhs)
+            else:
+                # All other join types need join conditions
+                assert left_on is not None  # noqa: S101
+                assert right_on is not None  # noqa: S101
+                
+                # Create join conditions
+                lhs = self._native_frame.alias("lhs")
+                rhs = other._native_frame.alias("rhs")
+                
+                # Build join condition by combining all key pairs with AND
+                conditions = [
+                    col(f'lhs."{left}"') == col(f'rhs."{right}"')
+                    for left, right in zip(left_on, right_on)
+                ]
+                condition = reduce(and_, conditions)
+                
+                # Perform the join using Snowpark's join method
+                # Snowpark join signature: join(right, on, join_type="inner")
+                joined = lhs.join(rhs, on=condition, join_type=native_how)
+            
+            # Handle column selection and suffix application
+            if native_how in {"inner", "left", "cross", "outer"}:
+                # Select columns from left side
+                select = [col(f'lhs."{name}"') for name in self.columns]
+                
+                # Add columns from right side with appropriate handling
+                for name in other.columns:
+                    col_in_lhs = name in self.columns
+                    
+                    if native_how == "outer" and not col_in_lhs:
+                        # For outer join, non-overlapping columns from right don't need suffix
+                        select.append(col(f'rhs."{name}"'))
+                    elif (native_how == "outer") or (
+                        col_in_lhs and (right_on is None or name not in right_on)
+                    ):
+                        # Add suffix for overlapping columns (except join keys in outer join)
+                        select.append(col(f'rhs."{name}"').alias(f"{name}{suffix}"))
+                    elif right_on is None or name not in right_on:
+                        # Non-overlapping columns from right don't need suffix
+                        select.append(col(f'rhs."{name}"'))
+                
+                result = joined.select(*select)
+            else:
+                # For semi and anti joins, only return left columns
+                select = [col(f'lhs."{name}"') for name in self.columns]
+                result = joined.select(*select)
+            
+            return self._with_native(result)
+            
+        except Exception as e:
+            msg = f"Failed to perform join on Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e

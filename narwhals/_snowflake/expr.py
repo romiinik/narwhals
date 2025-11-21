@@ -199,3 +199,107 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
     # __and__, __or__
     # Combined with __invert__ (implemented above), these provide full boolean logic support.
     # Snowpark Column objects support these operators natively for boolean operations.
+
+    # Aggregation functions
+    # Most aggregation functions (sum, mean, min, max, count, std, var, median) are inherited
+    # from SQLExpr and work with Snowpark's function API.
+    
+    def quantile(
+        self, quantile: float, interpolation: str
+    ) -> Self:
+        """Calculate the quantile of the expression.
+        
+        Arguments:
+            quantile: The quantile to calculate (between 0 and 1).
+            interpolation: Interpolation method (only 'linear' is supported).
+            
+        Returns:
+            A new SnowflakeExpr with the quantile aggregation.
+            
+        Raises:
+            NotImplementedError: If interpolation method is not 'linear'.
+        """
+        def func(expr: SnowparkColumnT) -> SnowparkColumnT:
+            if interpolation == "linear":
+                # Snowflake uses PERCENTILE_CONT for linear interpolation
+                # percentile_cont takes the percentile value as first argument
+                from snowflake.snowpark import functions as F
+                return F.percentile_cont(quantile).within_group(expr)
+            msg = "Only linear interpolation methods are supported for Snowflake quantile."
+            raise NotImplementedError(msg)
+
+        return self._with_callable(func)
+
+    def null_count(self) -> Self:
+        """Count the number of null values in the expression.
+        
+        Returns:
+            A new SnowflakeExpr with the null count aggregation.
+        """
+        def func(expr: SnowparkColumnT) -> SnowparkColumnT:
+            # Count nulls by summing is_null() cast to int
+            from snowflake.snowpark import functions as F
+            return F.sum(expr.is_null().cast("int"))
+
+        return self._with_callable(func)
+
+    def _count_star(self) -> SnowparkColumnT:
+        """Create a COUNT(*) expression.
+        
+        Returns:
+            A Snowpark Column representing COUNT(*).
+        """
+        from snowflake.snowpark import functions as F
+        return F.count("*")
+
+    def _first(self, expr: SnowparkColumnT, *order_by: str) -> SnowparkColumnT:
+        """Get the first value in a group, optionally ordered.
+        
+        This method is used by the base class's first() method which handles
+        the window function logic. This should return just the aggregation
+        function that will be wrapped in a window expression.
+        
+        Arguments:
+            expr: The expression to get the first value from.
+            order_by: Optional column names to order by (handled by caller).
+            
+        Returns:
+            A Snowpark Column representing the first value aggregation.
+        """
+        # For Snowflake, we can use FIRST_VALUE or ANY_VALUE
+        # The ordering is handled by the caller via _window_expression
+        from snowflake.snowpark import functions as F
+        
+        if order_by:
+            # When order_by is specified, use first_value
+            # The actual ordering will be applied by _window_expression
+            return F.first_value(expr)
+        else:
+            # Without ordering, use any_value
+            return F.any_value(expr)
+
+    def _last(self, expr: SnowparkColumnT, *order_by: str) -> SnowparkColumnT:
+        """Get the last value in a group, optionally ordered.
+        
+        This method is used by the base class's last() method which handles
+        the window function logic. This should return just the aggregation
+        function that will be wrapped in a window expression.
+        
+        Arguments:
+            expr: The expression to get the last value from.
+            order_by: Optional column names to order by (handled by caller).
+            
+        Returns:
+            A Snowpark Column representing the last value aggregation.
+        """
+        # For Snowflake, we can use LAST_VALUE or ANY_VALUE
+        # The ordering is handled by the caller via _window_expression
+        from snowflake.snowpark import functions as F
+        
+        if order_by:
+            # When order_by is specified, use last_value
+            # The actual ordering will be applied by _window_expression
+            return F.last_value(expr)
+        else:
+            # Without ordering, use any_value
+            return F.any_value(expr)
