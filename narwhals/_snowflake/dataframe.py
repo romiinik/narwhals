@@ -12,10 +12,12 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self, TypeIs
 
+    from narwhals._compliant.typing import CompliantDataFrameAny
     from narwhals._snowflake.expr import SnowflakeExpr
     from narwhals._snowflake.group_by import SnowflakeGroupBy
     from narwhals._snowflake.namespace import SnowflakeNamespace
     from narwhals._snowflake.typing import SnowparkDataFrameT
+    from narwhals._typing import _EagerAllowedImpl
     from narwhals._utils import _LimitedContext
     from narwhals.dataframe import LazyFrame
     from narwhals.dtypes import DType
@@ -133,10 +135,20 @@ class SnowflakeLazyFrame(
         
         Returns:
             The snowflake.snowpark module.
+            
+        Raises:
+            ImportError: If snowflake-snowpark-python is not installed.
         """
         from narwhals.dependencies import get_snowflake
 
-        return get_snowflake()  # type: ignore[no-any-return]
+        snowpark = get_snowflake()
+        if snowpark is None:
+            msg = (
+                "Snowflake Snowpark is required for Snowflake backend support. "
+                "Please install it with: pip install 'snowflake-snowpark-python[pandas]'"
+            )
+            raise ImportError(msg)
+        return snowpark  # type: ignore[no-any-return]
 
     def __narwhals_namespace__(self) -> SnowflakeNamespace:
         """Get the Snowflake namespace.
@@ -158,6 +170,23 @@ class SnowflakeLazyFrame(
             A new SnowflakeLazyFrame instance.
         """
         return self.__class__(df, version=self._version)
+    
+    def _check_columns_exist(self, columns: Sequence[str]) -> ValueError | None:
+        """Check if columns exist in the DataFrame.
+        
+        Arguments:
+            columns: Column names to check.
+            
+        Returns:
+            ValueError if any columns don't exist, None otherwise.
+        """
+        missing_cols = [col for col in columns if col not in self.columns]
+        if missing_cols:
+            return ValueError(
+                f"Columns {missing_cols} do not exist in the DataFrame. "
+                f"Available columns: {self.columns}"
+            )
+        return None
 
     @property
     def schema(self) -> dict[str, DType]:
@@ -197,13 +226,25 @@ class SnowflakeLazyFrame(
             
         Returns:
             A new SnowflakeLazyFrame with the selected columns.
+            
+        Raises:
+            ValueError: If no expressions are provided.
+            RuntimeError: If the select operation fails.
         """
-        from narwhals._snowflake.utils import evaluate_exprs_and_aliases
+        if not exprs:
+            msg = "At least one expression must be provided to select()"
+            raise ValueError(msg)
+            
+        try:
+            from narwhals._snowflake.utils import evaluate_exprs_and_aliases
 
-        selection = (
-            val.alias(name) for name, val in evaluate_exprs_and_aliases(self, *exprs)
-        )
-        return self._with_native(self._native_frame.select(*selection))
+            selection = (
+                val.alias(name) for name, val in evaluate_exprs_and_aliases(self, *exprs)
+            )
+            return self._with_native(self._native_frame.select(*selection))
+        except Exception as e:
+            msg = f"Failed to select columns from Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
 
     def simple_select(self, *column_names: str) -> Self:
         """Select columns by name.
@@ -213,8 +254,26 @@ class SnowflakeLazyFrame(
             
         Returns:
             A new SnowflakeLazyFrame with the selected columns.
+            
+        Raises:
+            ValueError: If no column names are provided or if column names don't exist.
+            RuntimeError: If the select operation fails.
         """
-        return self._with_native(self._native_frame.select(*column_names))
+        if not column_names:
+            msg = "At least one column name must be provided to simple_select()"
+            raise ValueError(msg)
+            
+        # Validate that all column names exist
+        missing_cols = [col for col in column_names if col not in self.columns]
+        if missing_cols:
+            msg = f"Columns {missing_cols} do not exist in the DataFrame. Available columns: {self.columns}"
+            raise ValueError(msg)
+            
+        try:
+            return self._with_native(self._native_frame.select(*column_names))
+        except Exception as e:
+            msg = f"Failed to select columns from Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
 
     def drop(self, columns: list[str], *, strict: bool) -> Self:
         """Drop columns from the DataFrame.
@@ -241,8 +300,20 @@ class SnowflakeLazyFrame(
             
         Returns:
             A new SnowflakeLazyFrame with at most n rows.
+            
+        Raises:
+            ValueError: If n is negative.
+            RuntimeError: If the head operation fails.
         """
-        return self._with_native(self._native_frame.limit(n))
+        if n < 0:
+            msg = f"Number of rows must be non-negative, got {n}"
+            raise ValueError(msg)
+            
+        try:
+            return self._with_native(self._native_frame.limit(n))
+        except Exception as e:
+            msg = f"Failed to limit Snowflake DataFrame to {n} rows: {e}"
+            raise RuntimeError(msg) from e
 
     def lazy(self, backend: None = None, **_: None) -> Self:
         """Return self as a lazy frame.
@@ -331,6 +402,10 @@ class SnowflakeLazyFrame(
             
         Returns:
             A new SnowflakeLazyFrame with null rows removed.
+            
+        Raises:
+            ValueError: If subset contains column names that don't exist.
+            RuntimeError: If the drop_nulls operation fails.
         """
         from functools import reduce
         from operator import and_
@@ -338,8 +413,24 @@ class SnowflakeLazyFrame(
         from narwhals._snowflake.utils import col
 
         subset_ = subset if subset is not None else self.columns
-        keep_condition = reduce(and_, (col(name).is_not_null() for name in subset_))
-        return self._with_native(self._native_frame.filter(keep_condition))
+        
+        # Validate that all columns in subset exist
+        if subset is not None:
+            missing_cols = [col_name for col_name in subset if col_name not in self.columns]
+            if missing_cols:
+                msg = f"Columns {missing_cols} do not exist in the DataFrame. Available columns: {self.columns}"
+                raise ValueError(msg)
+        
+        # Handle empty subset
+        if not subset_:
+            return self
+            
+        try:
+            keep_condition = reduce(and_, (col(name).is_not_null() for name in subset_))
+            return self._with_native(self._native_frame.filter(keep_condition))
+        except Exception as e:
+            msg = f"Failed to drop null rows from Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
 
     def rename(self, mapping: dict[str, str]) -> Self:
         """Rename columns in the DataFrame.
@@ -349,11 +440,35 @@ class SnowflakeLazyFrame(
             
         Returns:
             A new SnowflakeLazyFrame with renamed columns.
+            
+        Raises:
+            ValueError: If mapping contains column names that don't exist or if new names conflict.
+            RuntimeError: If the rename operation fails.
         """
-        result = self._native_frame
-        for old_name, new_name in mapping.items():
-            result = result.with_column_renamed(old_name, new_name)
-        return self._with_native(result)
+        if not mapping:
+            return self
+            
+        # Validate that all old column names exist
+        missing_cols = [old for old in mapping.keys() if old not in self.columns]
+        if missing_cols:
+            msg = f"Columns {missing_cols} do not exist in the DataFrame. Available columns: {self.columns}"
+            raise ValueError(msg)
+        
+        # Check for duplicate new names
+        new_names = list(mapping.values())
+        if len(new_names) != len(set(new_names)):
+            duplicates = [name for name in new_names if new_names.count(name) > 1]
+            msg = f"Duplicate new column names found: {set(duplicates)}"
+            raise ValueError(msg)
+            
+        try:
+            result = self._native_frame
+            for old_name, new_name in mapping.items():
+                result = result.with_column_renamed(old_name, new_name)
+            return self._with_native(result)
+        except Exception as e:
+            msg = f"Failed to rename columns in Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
 
     def group_by(
         self, *keys: str | SnowflakeExpr, drop_null_keys: bool
@@ -366,7 +481,22 @@ class SnowflakeLazyFrame(
             
         Returns:
             A SnowflakeGroupBy object for performing aggregations.
+            
+        Raises:
+            ValueError: If no keys are provided or if column names don't exist.
         """
+        if not keys:
+            msg = "At least one grouping key must be provided to group_by()"
+            raise ValueError(msg)
+            
+        # Validate string keys exist
+        string_keys = [k for k in keys if isinstance(k, str)]
+        if string_keys:
+            missing_cols = [k for k in string_keys if k not in self.columns]
+            if missing_cols:
+                msg = f"Grouping columns {missing_cols} do not exist in the DataFrame. Available columns: {self.columns}"
+                raise ValueError(msg)
+        
         from narwhals._snowflake.group_by import SnowflakeGroupBy
 
         return SnowflakeGroupBy(self, keys, drop_null_keys=drop_null_keys)
@@ -607,4 +737,132 @@ class SnowflakeLazyFrame(
             
         except Exception as e:
             msg = f"Failed to get unique rows from Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
+
+    def unpivot(
+        self,
+        on: Sequence[str] | None,
+        index: Sequence[str] | None,
+        variable_name: str,
+        value_name: str,
+    ) -> Self:
+        """Unpivot a DataFrame from wide to long format.
+        
+        This method transforms columns into rows, converting a wide-format DataFrame
+        into a long-format DataFrame. It's the inverse operation of pivot.
+        
+        Arguments:
+            on: Column names to unpivot. If None, unpivot all columns except those in index.
+            index: Column names to keep as identifier variables. If None, no columns are kept as identifiers.
+            variable_name: Name for the variable column that will contain the unpivoted column names.
+            value_name: Name for the value column that will contain the unpivoted values.
+            
+        Returns:
+            A new SnowflakeLazyFrame in long format.
+            
+        Raises:
+            NotImplementedError: If variable_name or value_name is an empty string.
+            ValueError: If column names don't exist or if there are no columns to unpivot.
+            RuntimeError: If the unpivot operation fails.
+        """
+        try:
+            # Validate that variable_name and value_name are not empty
+            if variable_name == "":
+                msg = "`variable_name` cannot be empty string for Snowflake backend."
+                raise NotImplementedError(msg)
+            
+            if value_name == "":
+                msg = "`value_name` cannot be empty string for Snowflake backend."
+                raise NotImplementedError(msg)
+            
+            # Determine index and on columns
+            index_ = [] if index is None else list(index)
+            on_ = [c for c in self.columns if c not in index_] if on is None else list(on)
+            
+            # Validate index columns exist
+            if index_ and (error := self._check_columns_exist(index_)):
+                raise error
+            
+            # Validate on columns exist
+            if on and (error := self._check_columns_exist(on)):
+                raise error
+            
+            # Check that there are columns to unpivot
+            if not on_:
+                msg = "No columns to unpivot. Either specify 'on' or ensure 'index' doesn't include all columns."
+                raise ValueError(msg)
+            
+            # Snowpark's unpivot method signature:
+            # unpivot(value_column, name_column, column_list)
+            # where:
+            # - value_column: name for the column that will hold the values
+            # - name_column: name for the column that will hold the column names
+            # - column_list: list of columns to unpivot
+            
+            result = self._native_frame.unpivot(value_name, variable_name, on_)
+            
+            # Select columns in the correct order: index columns first, then variable and value
+            final_columns = [*index_, variable_name, value_name]
+            result = result.select(*final_columns)
+            
+            return self._with_native(result)
+            
+        except Exception as e:
+            msg = f"Failed to unpivot Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e
+
+    def collect(
+        self, backend: _EagerAllowedImpl | None, **kwargs: Any
+    ) -> CompliantDataFrameAny:
+        """Execute the query and collect results into an eager DataFrame.
+        
+        This method executes the lazy Snowflake query and materializes the results
+        into an eager DataFrame using the specified backend.
+        
+        Arguments:
+            backend: The backend to use for the result DataFrame. Options:
+                - None or Implementation.PANDAS: Return a pandas DataFrame
+                - Implementation.PYARROW: Return a PyArrow Table
+            **kwargs: Additional keyword arguments (unused, for compatibility).
+            
+        Returns:
+            A compliant eager DataFrame with the query results.
+            
+        Raises:
+            RuntimeError: If the query execution fails.
+            ValueError: If an unsupported backend is specified.
+        """
+        try:
+            if backend is None or backend is Implementation.PANDAS:
+                from narwhals._pandas_like.dataframe import PandasLikeDataFrame
+
+                # Use Snowpark's to_pandas() to execute query and get pandas DataFrame
+                pandas_df = self._native_frame.to_pandas()
+                
+                return PandasLikeDataFrame(
+                    pandas_df,
+                    implementation=Implementation.PANDAS,
+                    validate_backend_version=True,
+                    version=self._version,
+                    validate_column_names=True,
+                )
+
+            if backend is Implementation.PYARROW:
+                from narwhals._arrow.dataframe import ArrowDataFrame
+
+                # Use Snowpark's to_arrow() to execute query and get PyArrow Table
+                arrow_table = self._native_frame.to_arrow()
+                
+                return ArrowDataFrame(
+                    arrow_table,
+                    validate_backend_version=True,
+                    version=self._version,
+                    validate_column_names=True,
+                )
+
+            msg = f"Unsupported `backend` value: {backend}"  # pragma: no cover
+            raise ValueError(msg)  # pragma: no cover
+            
+        except Exception as e:
+            msg = f"Failed to execute Snowflake query and collect results: {e}"
             raise RuntimeError(msg) from e

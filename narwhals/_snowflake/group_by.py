@@ -45,14 +45,26 @@ class SnowflakeGroupBy(SQLGroupBy["SnowflakeLazyFrame", "SnowflakeExpr", "Snowpa
             
         Returns:
             A new SnowflakeLazyFrame with the aggregated results.
+            
+        Raises:
+            ValueError: If no aggregation expressions are provided.
+            RuntimeError: If the aggregation operation fails.
         """
-        # Evaluate aggregation expressions
-        agg_columns = list(self._evaluate_exprs(exprs))
-        
-        # Use Snowpark's group_by().agg() pattern
-        result = self.compliant.native.group_by(self._keys).agg(*agg_columns)
-        
-        # Rename the grouping keys to their output names if needed
-        return self.compliant._with_native(result).rename(
-            dict(zip(self._keys, self._output_key_names))
-        )
+        if not exprs:
+            msg = "At least one aggregation expression must be provided to agg()"
+            raise ValueError(msg)
+            
+        try:
+            # Evaluate aggregation expressions
+            agg_columns = list(self._evaluate_exprs(exprs))
+            
+            # Use Snowpark's group_by().agg() pattern
+            result = self.compliant.native.group_by(self._keys).agg(*agg_columns)
+            
+            # Rename the grouping keys to their output names if needed
+            return self.compliant._with_native(result).rename(
+                dict(zip(self._keys, self._output_key_names))
+            )
+        except Exception as e:
+            msg = f"Failed to perform aggregation on grouped Snowflake DataFrame: {e}"
+            raise RuntimeError(msg) from e

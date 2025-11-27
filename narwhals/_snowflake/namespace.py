@@ -66,18 +66,26 @@ class SnowflakeNamespace(
             raise NotImplementedError(msg)
 
         items = list(items)
+        if not items:
+            msg = "Cannot concatenate empty list of DataFrames"
+            raise ValueError(msg)
+            
         native_items = [item._native_frame for item in items]
         schema = items[0].schema
         if not all(x.schema == schema for x in items[1:]):
             msg = "inputs should all have the same schema"
             raise TypeError(msg)
 
-        # Use Snowpark's union_all for vertical concatenation
-        result = native_items[0]
-        for native_item in native_items[1:]:
-            result = result.union_all(native_item)
+        try:
+            # Use Snowpark's union_all for vertical concatenation
+            result = native_items[0]
+            for native_item in native_items[1:]:
+                result = result.union_all(native_item)
 
-        return self._lazyframe(result)
+            return self._lazyframe(result, version=self._version)
+        except Exception as e:
+            msg = f"Failed to concatenate Snowflake DataFrames: {e}"
+            raise RuntimeError(msg) from e
 
     def concat_str(
         self, *exprs: SnowflakeExpr, separator: str, ignore_nulls: bool

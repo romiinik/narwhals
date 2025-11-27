@@ -200,8 +200,18 @@ def col(name: str) -> SnowparkColumnT:
 
     Returns:
         Snowpark Column object.
+        
+    Raises:
+        ImportError: If snowflake-snowpark-python is not installed.
     """
-    from snowflake.snowpark import functions as F
+    try:
+        from snowflake.snowpark import functions as F
+    except ImportError as e:
+        msg = (
+            "Snowflake Snowpark is required for Snowflake backend support. "
+            "Please install it with: pip install 'snowflake-snowpark-python[pandas]'"
+        )
+        raise ImportError(msg) from e
 
     return F.col(name)
 
@@ -215,8 +225,18 @@ def lit(value: Any, dtype: SnowparkDataTypeT | None = None) -> SnowparkColumnT:
 
     Returns:
         Snowpark Column object representing the literal.
+        
+    Raises:
+        ImportError: If snowflake-snowpark-python is not installed.
     """
-    from snowflake.snowpark import functions as F
+    try:
+        from snowflake.snowpark import functions as F
+    except ImportError as e:
+        msg = (
+            "Snowflake Snowpark is required for Snowflake backend support. "
+            "Please install it with: pip install 'snowflake-snowpark-python[pandas]'"
+        )
+        raise ImportError(msg) from e
 
     if dtype is not None:
         return F.lit(value).cast(dtype)
@@ -231,8 +251,18 @@ def when(condition: SnowparkColumnT) -> Any:
 
     Returns:
         Snowpark CaseExpr object.
+        
+    Raises:
+        ImportError: If snowflake-snowpark-python is not installed.
     """
-    from snowflake.snowpark import functions as F
+    try:
+        from snowflake.snowpark import functions as F
+    except ImportError as e:
+        msg = (
+            "Snowflake Snowpark is required for Snowflake backend support. "
+            "Please install it with: pip install 'snowflake-snowpark-python[pandas]'"
+        )
+        raise ImportError(msg) from e
 
     return F.when(condition)
 
@@ -245,8 +275,18 @@ def coalesce(*columns: SnowparkColumnT) -> SnowparkColumnT:
 
     Returns:
         Snowpark Column object.
+        
+    Raises:
+        ImportError: If snowflake-snowpark-python is not installed.
     """
-    from snowflake.snowpark import functions as F
+    try:
+        from snowflake.snowpark import functions as F
+    except ImportError as e:
+        msg = (
+            "Snowflake Snowpark is required for Snowflake backend support. "
+            "Please install it with: pip install 'snowflake-snowpark-python[pandas]'"
+        )
+        raise ImportError(msg) from e
 
     return F.coalesce(*columns)
 
@@ -260,8 +300,19 @@ def function(name: str, *args: SnowparkColumnT) -> SnowparkColumnT:
 
     Returns:
         Snowpark Column object.
+        
+    Raises:
+        ImportError: If snowflake-snowpark-python is not installed.
+        NotImplementedError: If the function is not available in Snowpark.
     """
-    from snowflake.snowpark import functions as F
+    try:
+        from snowflake.snowpark import functions as F
+    except ImportError as e:
+        msg = (
+            "Snowflake Snowpark is required for Snowflake backend support. "
+            "Please install it with: pip install 'snowflake-snowpark-python[pandas]'"
+        )
+        raise ImportError(msg) from e
 
     # Handle special cases
     if name == "count_distinct":
@@ -270,10 +321,20 @@ def function(name: str, *args: SnowparkColumnT) -> SnowparkColumnT:
         return args[0].is_null()
     if name == "isnotnull":
         return args[0].is_not_null()
+    
+    # Map function names to Snowpark equivalents
+    function_map = {
+        "starts_with": "startswith",
+        "ends_with": "endswith",
+        "str_split": "split",
+        "regexp_matches": "rlike",
+    }
+    
+    snowpark_name = function_map.get(name, name)
 
     # Try to get the function from Snowpark functions module
-    if hasattr(F, name):
-        return getattr(F, name)(*args)
+    if hasattr(F, snowpark_name):
+        return getattr(F, snowpark_name)(*args)
 
     msg = f"Function '{name}' is not available in Snowpark"
     raise NotImplementedError(msg)

@@ -7,6 +7,7 @@ from narwhals._utils import Implementation, Version
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import Any
 
     from typing_extensions import Self
 
@@ -17,9 +18,12 @@ if TYPE_CHECKING:
         WindowFunction,
     )
     from narwhals._snowflake.dataframe import SnowflakeLazyFrame
+    from narwhals._snowflake.expr_dt import SnowflakeExprDateTimeNamespace
+    from narwhals._snowflake.expr_str import SnowflakeExprStringNamespace
     from narwhals._snowflake.namespace import SnowflakeNamespace
     from narwhals._snowflake.typing import SnowparkColumnT
-    from narwhals._utils import _LimitedContext
+    from narwhals._utils import _LimitedContext, NoDefault
+    from narwhals.typing import ClosedInterval, FillNullStrategy, IntoDType
 
     SnowflakeWindowFunction = WindowFunction[SnowflakeLazyFrame, SnowparkColumnT]
 
@@ -217,8 +221,14 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
             A new SnowflakeExpr with the quantile aggregation.
             
         Raises:
+            ValueError: If quantile is not between 0 and 1.
             NotImplementedError: If interpolation method is not 'linear'.
         """
+        # Validate quantile value
+        if not 0 <= quantile <= 1:
+            msg = f"Quantile must be between 0 and 1, got {quantile}"
+            raise ValueError(msg)
+            
         def func(expr: SnowparkColumnT) -> SnowparkColumnT:
             if interpolation == "linear":
                 # Snowflake uses PERCENTILE_CONT for linear interpolation
@@ -303,3 +313,291 @@ class SnowflakeExpr(SQLExpr["SnowflakeLazyFrame", "SnowparkColumnT"]):
         else:
             # Without ordering, use any_value
             return F.any_value(expr)
+
+    # Fill and replace operations
+    def fill_null(
+        self, value: Self | None, strategy: FillNullStrategy | None, limit: int | None
+    ) -> Self:
+        """Fill null values with a value or strategy.
+        
+        Arguments:
+            value: Value to fill nulls with (if strategy is None).
+            strategy: Strategy to use for filling ('forward' or 'backward').
+            limit: Maximum number of consecutive nulls to fill.
+            
+        Returns:
+            A new SnowflakeExpr with nulls filled.
+            
+        Raises:
+            ValueError: If both value and strategy are None, or if limit is negative.
+        """
+        from narwhals._compliant.window import WindowInputs
+        
+        # Validate parameters
+        if value is None and strategy is None:
+            msg = "Either 'value' or 'strategy' must be provided to fill_null()"
+            raise ValueError(msg)
+            
+        if limit is not None and limit < 0:
+            msg = f"Limit must be non-negative, got {limit}"
+            raise ValueError(msg)
+        
+        if strategy is not None:
+            # Validate strategy value
+            valid_strategies = {"forward", "backward"}
+            if strategy not in valid_strategies:
+                msg = f"Invalid strategy '{strategy}'. Must be one of {valid_strategies}"
+                raise ValueError(msg)
+                
+            def _fill_with_strategy(
+                df: SnowflakeLazyFrame, inputs: WindowInputs[SnowparkColumnT]
+            ) -> Sequence[SnowparkColumnT]:
+                from snowflake.snowpark import functions as F
+                
+                # Snowflake uses FIRST_VALUE for forward fill and LAST_VALUE for backward fill
+                # with IGNORE NULLS option
+                fill_func_name = "last_value" if strategy == "forward" else "first_value"
+                fill_func = getattr(F, fill_func_name)
+                
+                rows_start, rows_end = (
+                    (-limit if limit is not None else None, 0)
+                    if strategy == "forward"
+                    else (0, limit)
+                )
+                
+                return [
+                    self._window_expression(
+                        fill_func(expr, ignore_nulls=True),
+                        inputs.partition_by,
+                        inputs.order_by,
+                        rows_start=rows_start,
+                        rows_end=rows_end,
+                    )
+                    for expr in self(df)
+                ]
+            
+            return self._with_window_function(_fill_with_strategy)
+        
+        def _fill_constant(expr: SnowparkColumnT, value: SnowparkColumnT) -> SnowparkColumnT:
+            return self._coalesce(expr, value)
+        
+        assert value is not None  # noqa: S101
+        return self._with_elementwise(_fill_constant, value=value)
+
+    def replace_strict(
+        self,
+        default: Self | NoDefault,
+        old: Sequence[Any],
+        new: Sequence[Any],
+        *,
+        return_dtype: IntoDType | None,
+    ) -> Self:
+        """Replace values strictly, requiring all old values to be present.
+        
+        Arguments:
+            default: Default value to use when old value is not in the mapping.
+            old: Sequence of values to replace.
+            new: Sequence of replacement values.
+            return_dtype: Optional dtype to cast the result to.
+            
+        Returns:
+            A new SnowflakeExpr with values replaced.
+            
+        Raises:
+            ValueError: If default is not provided.
+        """
+        from narwhals._utils import no_default
+        
+        if default is no_default:
+            msg = "`replace_strict` requires an explicit value for `default` for Snowflake backend."
+            raise ValueError(msg)
+        
+        def func(df: SnowflakeLazyFrame) -> list[SnowparkColumnT]:
+            from snowflake.snowpark import functions as F
+            
+            default_col = df._evaluate_single_output_expr(default)
+            
+            # Build a CASE WHEN expression for each old->new mapping
+            results = []
+            for expr in self(df):
+                # Start with the default
+                result = default_col
+                
+                # Build the CASE WHEN chain in reverse order
+                for old_val, new_val in zip(reversed(list(old)), reversed(list(new))):
+                    result = self._when(
+                        expr == self._lit(old_val),
+                        self._lit(new_val),
+                        result
+                    )
+                
+                results.append(result)
+            
+            if return_dtype:
+                from narwhals._snowflake.utils import narwhals_to_native_dtype
+                native_dtype = narwhals_to_native_dtype(return_dtype, self._version)
+                return [res.cast(native_dtype) for res in results]
+            
+            return results
+        
+        return self.__class__(
+            func,
+            None,
+            evaluate_output_names=self._evaluate_output_names,
+            alias_output_names=self._alias_output_names,
+            version=self._version,
+            implementation=self._implementation,
+        )
+
+    # Conditional operations
+    def is_in(self, other: Sequence[Any]) -> Self:
+        """Check if values are in a given sequence.
+        
+        Arguments:
+            other: Sequence of values to check membership against.
+            
+        Returns:
+            A new SnowflakeExpr with boolean values indicating membership.
+        """
+        from snowflake.snowpark import functions as F
+        
+        def func(expr: SnowparkColumnT) -> SnowparkColumnT:
+            # Snowflake uses isin() method on Column
+            return expr.isin(list(other))
+        
+        return self._with_elementwise(func)
+
+    def is_between(
+        self, lower_bound: Self, upper_bound: Self, closed: ClosedInterval
+    ) -> Self:
+        """Check if values are between bounds.
+        
+        Arguments:
+            lower_bound: Lower bound expression.
+            upper_bound: Upper bound expression.
+            closed: Which bounds are inclusive ('left', 'right', 'both', 'none').
+            
+        Returns:
+            A new SnowflakeExpr with boolean values indicating if values are in range.
+            
+        Raises:
+            ValueError: If closed parameter has an invalid value.
+        """
+        # Validate closed parameter early
+        valid_closed = {"left", "right", "both", "none"}
+        if closed not in valid_closed:
+            msg = f"Invalid value for `closed`: {closed}. Must be one of {valid_closed}"
+            raise ValueError(msg)
+            
+        def func(
+            expr: SnowparkColumnT,
+            lower_bound: SnowparkColumnT,
+            upper_bound: SnowparkColumnT,
+        ) -> SnowparkColumnT:
+            if closed == "left":
+                return (expr >= lower_bound) & (expr < upper_bound)
+            elif closed == "right":
+                return (expr > lower_bound) & (expr <= upper_bound)
+            elif closed == "none":
+                return (expr > lower_bound) & (expr < upper_bound)
+            else:  # closed == "both"
+                return (expr >= lower_bound) & (expr <= upper_bound)
+        
+        return self._with_elementwise(
+            func, lower_bound=lower_bound, upper_bound=upper_bound
+        )
+
+    # Type checking and casting
+    def cast(self, dtype: IntoDType) -> Self:
+        """Cast the expression to a different data type.
+        
+        Arguments:
+            dtype: The target data type to cast to.
+            
+        Returns:
+            A new SnowflakeExpr with the cast applied.
+            
+        Raises:
+            NotImplementedError: If the dtype is not supported for Snowflake.
+            RuntimeError: If the cast operation fails.
+        """
+        from narwhals._snowflake.utils import narwhals_to_native_dtype
+        
+        def func(expr: SnowparkColumnT) -> SnowparkColumnT:
+            try:
+                native_dtype = narwhals_to_native_dtype(dtype, self._version)
+                return expr.cast(native_dtype)
+            except NotImplementedError:
+                raise
+            except Exception as e:
+                msg = f"Failed to cast expression to {dtype}: {e}"
+                raise RuntimeError(msg) from e
+        
+        return self._with_elementwise(func)
+
+    def is_not_null(self) -> Self:
+        """Check if the expression is not null.
+        
+        Returns:
+            A new SnowflakeExpr with boolean values indicating non-null elements.
+        """
+        return self._with_elementwise(lambda expr: expr.is_not_null())
+
+    def is_nan(self) -> Self:
+        """Check if the expression contains NaN values.
+        
+        Returns:
+            A new SnowflakeExpr with boolean values indicating NaN elements.
+        """
+        from snowflake.snowpark import functions as F
+        
+        def func(expr: SnowparkColumnT) -> SnowparkColumnT:
+            # For Snowflake, we need to check if the value is not null first
+            # then check if it's NaN
+            return self._when(expr.is_not_null(), F.is_nan(expr), self._lit(False))
+        
+        return self._with_elementwise(func)
+
+    def is_finite(self) -> Self:
+        """Check if the expression contains finite values.
+        
+        Returns:
+            A new SnowflakeExpr with boolean values indicating finite elements.
+        """
+        from snowflake.snowpark import functions as F
+        
+        def func(expr: SnowparkColumnT) -> SnowparkColumnT:
+            # A value is finite if it's not null, not NaN, and not infinite
+            # In Snowflake, we check: not null AND not NaN AND not infinite
+            is_not_nan = ~F.is_nan(expr)
+            is_not_inf = ~F.is_infinite(expr)
+            return self._when(
+                expr.is_not_null(),
+                is_not_nan & is_not_inf,
+                self._lit(False)
+            )
+        
+        return self._with_elementwise(func)
+
+    # Namespaces
+    @property
+    def str(self) -> SnowflakeExprStringNamespace:
+        """Access string operations namespace.
+        
+        Returns:
+            A SnowflakeExprStringNamespace for string operations.
+        """
+        from narwhals._snowflake.expr_str import SnowflakeExprStringNamespace
+        
+        return SnowflakeExprStringNamespace(self)
+
+    @property
+    def dt(self) -> SnowflakeExprDateTimeNamespace:
+        """Access datetime operations namespace.
+        
+        Returns:
+            A SnowflakeExprDateTimeNamespace for datetime operations.
+        """
+        from narwhals._snowflake.expr_dt import SnowflakeExprDateTimeNamespace
+        
+        return SnowflakeExprDateTimeNamespace(self)

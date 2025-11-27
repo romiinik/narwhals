@@ -575,6 +575,19 @@ class Implementation(NoAutoEnum):
         """
         return self is Implementation.IBIS  # pragma: no cover
 
+    def is_snowflake(self) -> bool:
+        """Return whether implementation is Snowflake.
+
+        Examples:
+            >>> import polars as pl
+            >>> import narwhals as nw
+            >>> df_native = pl.DataFrame({"a": [1, 2, 3]})
+            >>> df = nw.from_native(df_native)
+            >>> df.implementation.is_snowflake()
+            False
+        """
+        return self is Implementation.SNOWFLAKE  # pragma: no cover
+
     def is_sqlframe(self) -> bool:
         """Return whether implementation is SQLFrame.
 

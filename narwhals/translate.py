@@ -534,11 +534,21 @@ def _from_native_impl(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 msg = "Cannot only use `series_only=True` or `eager_only=False` with Snowpark DataFrame"
                 raise TypeError(msg)
             return native_object
-        return (
-            version.namespace.from_native_object(native_object)
-            .compliant.from_native(native_object)
-            .to_narwhals()
-        )
+        try:
+            return (
+                version.namespace.from_native_object(native_object)
+                .compliant.from_native(native_object)
+                .to_narwhals()
+            )
+        except ImportError as e:
+            msg = (
+                "Snowflake Snowpark is required for Snowflake backend support. "
+                "Please install it with: pip install 'snowflake-snowpark-python[pandas]'"
+            )
+            raise ImportError(msg) from e
+        except Exception as e:
+            msg = f"Failed to convert Snowpark DataFrame to Narwhals: {e}"
+            raise RuntimeError(msg) from e
 
     # PySpark
     if is_native_spark_like(native_object):  # pragma: no cover
